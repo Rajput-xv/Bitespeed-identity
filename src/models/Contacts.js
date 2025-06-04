@@ -10,7 +10,8 @@ const contactSchema = new mongoose.Schema({
     default: null
   },
   linkedId: {
-    type: Number,
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Contact',
     default: null
   },
   linkPrecedence: {

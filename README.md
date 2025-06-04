@@ -53,4 +53,4 @@ Response:
 ```
 
 ## Hosting
-The API is hosted on [Render]()
+The API is hosted on [Render](https://bitespeed-identity-2p8x.onrender.com/identify).

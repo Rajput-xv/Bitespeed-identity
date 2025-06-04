@@ -8,21 +8,15 @@ exports.identify = async (req, res) => {
       return res.status(400).json({ error: 'Either email or phoneNumber is required' });
     }
 
-    const query = {
-      $and: [
-        { deletedAt: null },
-        {
-          $or: [
-            email ? { email } : null,
-            phoneNumber ? { phoneNumber } : null
-          ].filter(Boolean)
-        }
+    const matchingContacts = await Contact.find({
+      deletedAt: null,
+      $or: [
+        ...(email ? [{ email }] : []),
+        ...(phoneNumber ? [{ phoneNumber }] : [])
       ]
-    };
+    }).sort({ createdAt: 1 });
 
-    const existingContacts = await Contact.find(query).sort({ createdAt: 1 });
-
-    if (existingContacts.length === 0) {
+    if (matchingContacts.length === 0) {
       const newContact = new Contact({
         phoneNumber,
         email,
@@ -40,13 +34,32 @@ exports.identify = async (req, res) => {
       });
     }
 
-    const primaryContacts = existingContacts.filter(c => c.linkPrecedence === 'primary');
-    
-    if (primaryContacts.length > 1) {
-      const oldestPrimary = primaryContacts.reduce((oldest, current) => 
-        current.createdAt < oldest.createdAt ? current : oldest
-      );
+    const allPrimaryIds = new Set();
+    const allContactIds = new Set();
 
+    matchingContacts.forEach(contact => {
+      allContactIds.add(contact._id.toString());
+      if (contact.linkPrecedence === 'primary') {
+        allPrimaryIds.add(contact._id.toString());
+      } else if (contact.linkedId) {
+        allPrimaryIds.add(contact.linkedId.toString());
+      }
+    });
+
+    const allRelatedContacts = await Contact.find({
+      deletedAt: null,
+      $or: [
+        { _id: { $in: Array.from(allPrimaryIds) } },
+        { linkedId: { $in: Array.from(allPrimaryIds) } }
+      ]
+    }).sort({ createdAt: 1 });
+
+    const primaryContacts = allRelatedContacts.filter(c => c.linkPrecedence === 'primary');
+    const oldestPrimary = primaryContacts.reduce((oldest, current) => 
+      current.createdAt < oldest.createdAt ? current : oldest
+    );
+
+    if (primaryContacts.length > 1) {
       for (const contact of primaryContacts) {
         if (contact._id.toString() !== oldestPrimary._id.toString()) {
           contact.linkPrecedence = 'secondary';
@@ -56,64 +69,58 @@ exports.identify = async (req, res) => {
       }
     }
 
-    const primaryContact = primaryContacts.length > 0 
-      ? primaryContacts.reduce((oldest, current) => 
-          current.createdAt < oldest.createdAt ? current : oldest
-        )
-      : existingContacts.find(c => c.linkPrecedence === 'primary');
-
-    const primaryContactId = primaryContact ? primaryContact._id : existingContacts[0].linkedId;
-
-    const exactMatch = existingContacts.find(c => 
+    const exactMatch = allRelatedContacts.find(c => 
       c.email === email && c.phoneNumber === phoneNumber
     );
 
     if (!exactMatch) {
-      const hasNewInfo = !existingContacts.some(c => 
-        (email && c.email === email) && (phoneNumber && c.phoneNumber === phoneNumber)
-      );
+      const hasEmailMatch = email && allRelatedContacts.some(c => c.email === email);
+      const hasPhoneMatch = phoneNumber && allRelatedContacts.some(c => c.phoneNumber === phoneNumber);
+      const hasNewEmail = email && !allRelatedContacts.some(c => c.email === email);
+      const hasNewPhone = phoneNumber && !allRelatedContacts.some(c => c.phoneNumber === phoneNumber);
 
-      if (hasNewInfo) {
+      if ((hasEmailMatch || hasPhoneMatch) && (hasNewEmail || hasNewPhone)) {
         const newContact = new Contact({
           phoneNumber,
           email,
-          linkedId: primaryContactId,
+          linkedId: oldestPrimary._id,
           linkPrecedence: 'secondary'
         });
         await newContact.save();
       }
     }
 
-    const allRelatedContacts = await Contact.find({
-      $and: [
-        { deletedAt: null },
-        {
-          $or: [
-            { _id: primaryContactId },
-            { linkedId: primaryContactId }
-          ]
-        }
+    const finalRelatedContacts = await Contact.find({
+      deletedAt: null,
+      $or: [
+        { _id: oldestPrimary._id },
+        { linkedId: oldestPrimary._id }
       ]
     }).sort({ createdAt: 1 });
 
-    const primary = allRelatedContacts.find(c => c.linkPrecedence === 'primary');
-    const secondaries = allRelatedContacts.filter(c => c.linkPrecedence === 'secondary');
+    const primary = finalRelatedContacts.find(c => c.linkPrecedence === 'primary');
+    const secondaries = finalRelatedContacts.filter(c => c.linkPrecedence === 'secondary');
 
-    const emails = [...new Set([
-      primary?.email,
-      ...secondaries.map(c => c.email)
-    ].filter(Boolean))];
+    const allEmails = [];
+    const allPhoneNumbers = [];
 
-    const phoneNumbers = [...new Set([
-      primary?.phoneNumber,
-      ...secondaries.map(c => c.phoneNumber)
-    ].filter(Boolean))];
+    if (primary.email) allEmails.push(primary.email);
+    if (primary.phoneNumber) allPhoneNumbers.push(primary.phoneNumber);
+
+    secondaries.forEach(contact => {
+      if (contact.email && !allEmails.includes(contact.email)) {
+        allEmails.push(contact.email);
+      }
+      if (contact.phoneNumber && !allPhoneNumbers.includes(contact.phoneNumber)) {
+        allPhoneNumbers.push(contact.phoneNumber);
+      }
+    });
 
     res.json({
       contact: {
         primaryContatctId: primary._id,
-        emails,
-        phoneNumbers,
+        emails: allEmails,
+        phoneNumbers: allPhoneNumbers,
         secondaryContactIds: secondaries.map(c => c._id)
       }
     });
